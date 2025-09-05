@@ -14,6 +14,9 @@ TOKEN = os.getenv("TOKEN")
 GUILD_ID = int(os.getenv("Enemies"))
 CHANNEL_ID = int(os.getenv("sdn"))
 
+if not TOKEN or not GUILD_ID or not CHANNEL_ID:
+    raise RuntimeError("Environment variables TOKEN, Enemies, or sdn are missing!")
+
 # -----------------------------
 # Timezone
 # -----------------------------
@@ -27,7 +30,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 # -----------------------------
-# Boss Configuration
+# Boss Configurations
 # -----------------------------
 WORLD_BOSSES = {
     "Venatus": 10,
@@ -69,14 +72,14 @@ UNIQUE_MONSTERS = {
 }
 
 DESTROYER_BOSS = "Destroyer"
-DESTROYER_TIMES = [(time(11, 0), time(12, 0)), (time(20, 0), time(21, 0))]  # 11AM-12PM, 8PM-9PM UTC+8
+DESTROYER_TIMES = [(time(11, 0), time(12, 0)), (time(20, 0), time(21, 0))]  # UTC+8
 
 # -----------------------------
 # Timers
 # -----------------------------
 world_timers = {}     # {boss_name: datetime}
 unique_timers = {}    # {monster_name: datetime}
-destroyer_sent = False  # track destroyer message per session
+destroyer_sent = False
 
 # -----------------------------
 # Keep Alive
@@ -96,7 +99,7 @@ async def on_ready():
         timer_loop.start()
 
 # -----------------------------
-# Helper Functions
+# Helpers
 # -----------------------------
 def format_time(dt):
     return dt.astimezone(UTC8).strftime("%I:%M %p")
@@ -111,14 +114,14 @@ def is_unique(name):
     return name in UNIQUE_MONSTERS
 
 # -----------------------------
-# Autocomplete for /add and /remove
+# Autocomplete
 # -----------------------------
 async def boss_autocomplete(interaction: discord.Interaction, current: str):
     options = list(WORLD_BOSSES.keys()) + list(UNIQUE_MONSTERS.keys()) + [DESTROYER_BOSS]
     return [
         app_commands.Choice(name=b, value=b)
         for b in options if current.lower() in b.lower()
-    ][:25]  # max 25 choices
+    ][:25]
 
 # -----------------------------
 # Slash Commands
@@ -139,7 +142,7 @@ async def add(interaction: discord.Interaction, name: str):
         unique_timers[name] = now + timedelta(minutes=UNIQUE_MONSTERS[name])
         await interaction.response.send_message(f"✅ {name} added! Respawn at {format_time(unique_timers[name])}")
     elif name == DESTROYER_BOSS:
-        await interaction.response.send_message(f"✅ {DESTROYER_BOSS} notifications enabled for scheduled times.")
+        await interaction.response.send_message(f"✅ {DESTROYER_BOSS} notifications enabled.")
     else:
         await interaction.response.send_message("❌ Boss/monster not found.")
 
@@ -164,20 +167,20 @@ async def help(interaction: discord.Interaction):
     msg = (
         "**Bot Commands**\n"
         "/ping - Check if the bot is awake\n"
-        "/add <Boss/Monster> - Start timer for a boss/monster\n"
+        "/add <Boss/Monster> - Start timer\n"
         "   Examples:\n"
         "      /add Alarak\n"
         "      /add Venatus\n"
-        "/remove <Boss/Monster> - Remove an existing timer\n"
+        "/remove <Boss/Monster> - Remove timer\n"
         "   Examples:\n"
         "      /remove Alarak\n"
         "      /remove Undomiel\n"
-        "Note: Destroyer notifications are automatic during 11AM-12PM and 8PM-9PM UTC+8."
+        "Destroyer notifications are automatic during 11AM-12PM and 8PM-9PM UTC+8."
     )
     await interaction.response.send_message(msg)
 
 # -----------------------------
-# Timer Loop
+# Timer Loop (Single Notification)
 # -----------------------------
 @tasks.loop(minutes=1)
 async def timer_loop():
@@ -190,18 +193,15 @@ async def timer_loop():
     for name, dt in list(world_timers.items()):
         if now >= dt - timedelta(minutes=2) and now < dt:
             await channel.send(f"⚔️ **{name}** will spawn in ~2 minutes!")
-        if now >= dt:
-            del world_timers[name]
+            del world_timers[name]  # notify once
 
     # Unique monsters
     for name, dt in list(unique_timers.items()):
         if now >= dt - timedelta(minutes=1) and now < dt:
             await channel.send(f"🔥 **{name}** will spawn in ~1 minute!")
-        if now >= dt:
-            del unique_timers[name]
-            unique_timers[name] = now + timedelta(minutes=UNIQUE_MONSTERS[name])
+            del unique_timers[name]  # notify once
 
-    # Destroyer boss
+    # Destroyer boss (constant during scheduled times)
     global destroyer_sent
     for start, end in DESTROYER_TIMES:
         if start <= now.time() <= end:
