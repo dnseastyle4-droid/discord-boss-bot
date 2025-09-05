@@ -1,194 +1,193 @@
-# main.py
 import os
+import asyncio
+from datetime import datetime, timedelta, timezone
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, timedelta, time
-from flask import Flask
+from discord import app_commands
 
-# -----------------------------
-# Environment Variables
-# -----------------------------
 TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+GUILD_ID = int(os.getenv("GUILD_ID"))
+CHANNEL_ID = int(os.getenv("CHANNEL"))  # Channel for reminders
 
-# -----------------------------
-# Bot Initialization
-# -----------------------------
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
+tree = bot.tree
 
-# -----------------------------
-# Boss Configuration
-# -----------------------------
-BOSSES = {
-    "Venatus": 10, "Viorent": 10, "Ego": 21, "Livera": 24, "Araneo": 21,
-    "Undomiel": 24, "Lady Dalia": 18, "General Aquleus": 29,
-    "Amentis": 29, "Baron Braudmore": 32
+# ---------------- Boss Data ---------------- #
+
+# Respawn bosses (minutes)
+RESPAWN_BOSSES = {
+    "supore": 62, "asta": 62, "secreta": 62, "ordo": 62,
+    "gareth": 32, "shuliar": 35, "larba": 35, "catena": 35,
+    "titore": 37, "duplican": 48, "metus": 48, "wannitas": 48
 }
+
+# Scheduled bosses (specific times in PH time, UTC+8)
+SCHEDULED_BOSSES = {
+    "clemantis": [("monday", "11:30"), ("thursday", "19:00")],
+    "saphirus": [("sunday", "17:00"), ("tuesday", "11:30")],
+    "neutro": [("tuesday", "19:00"), ("thursday", "11:30")],
+    "thymele": [("monday", "19:00"), ("wednesday", "11:30")],
+    "milavy": [("saturday", "15:00")],
+    "ringor": [("saturday", "17:00")],
+    "roderick": [("friday", "19:00")],
+    "auraq": [("sunday", "21:00"), ("wednesday", "21:00")],
+    "chailflock": [("saturday", "22:00")]
+}
+
+# Unique monsters (always 15 min respawn)
 UNIQUE_MONSTERS = {
-    "Outlaw Kaiser":15, "Screaming Wings":15, "Suspicious Wizard":15,
-    "Dark Apparition":15, "Brutal Butcher":15, "Corrupted Shellbug":15,
-    "Secret Creation":15, "Magic Puppet":15, "Wizard's Puppet":15,
-    "Lamia Shaman":15, "Angusto":15, "Berserk Thardus":15, "Ancient Thardus":15,
-    "Charging Thardus":15, "Desert Golem":15, "Alarak":15, "Ancient Turtle":15,
-    "Protector of the Ruins":15, "Black Hand":15, "Ancient Protector":15,
-    "Black Wedge":15, "Intikam":15, "Desert Protector":15
+    "blood mother", "decoy", "ghost webber", "shadow webber",
+    "escort leader maximus", "fortuneteller ariel", "priest petroca",
+    "sylandra", "halfmoon stone turtle", "cobolt blitz captain",
+    "black wings", "forgotten olive", "deadman's grow", "cassandra",
+    "mutated scorpion", "berserk higher harpy",
+    "red lizardman patrol captain", "lyrian", "durian", "infected kukri",
+    "straggler brown", "veridon", "shaug blitz captain",
+    "shaug high-ranking wizard", "shaug patrol captain",
+    "elder lich", "catena's eye", "elder scorpius", "catena's servant",
+    "catena's cry", "catena's ego", "catena's rage", "catena's sorrow"
 }
-DESTROYER_BOSSES = ["Ratan","Parto","Nedra"]
 
-# -----------------------------
-# Timer storage
-# -----------------------------
-boss_timers = {}         # {boss: respawn_datetime}
-added_unique = set()     # names of active unique monsters
-unique_timers = {}       # {unique_name: spawn_datetime}
-destroyer_notified = set()   # destroyer notifications
+# Destroyer bosses (fixed daily schedule, notify once)
+DESTROYER_BOSSES = {
+    "ratan": [("11:00", "12:00"), ("20:00", "21:00")],
+    "parto": [("11:00", "12:00"), ("20:00", "21:00")],
+    "nedra": [("11:00", "12:00"), ("20:00", "21:00")]
+}
 
-# -----------------------------
-# Flask app for uptime monitoring
-# -----------------------------
-app = Flask(__name__)
+# ---------------- Storage ---------------- #
+pending_bosses = {}   # {boss_name: expire_time}
+notified_destroyers = set()  # track daily destroyer reminders
 
-@app.route("/")
-def home():
-    return "Bot is running!"
+# ---------------- Helpers ---------------- #
 
-# -----------------------------
-# Helper Functions
-# -----------------------------
-def get_channel():
-    return bot.get_channel(CHANNEL_ID)
+def ph_time_now():
+    return datetime.now(timezone.utc) + timedelta(hours=8)
 
-def utc_now():
-    return datetime.utcnow() + timedelta(hours=8)
+def normalize(name: str):
+    return name.lower().strip()
 
-def format_time(dt):
-    return dt.strftime("%I:%M %p")  # 12-hour format
+# ---------------- Commands ---------------- #
 
-# -----------------------------
-# Init unique timers
-# -----------------------------
-for u, mins in UNIQUE_MONSTERS.items():
-    unique_timers[u.lower()] = utc_now() + timedelta(minutes=mins)
-
-# -----------------------------
-# Slash Commands
-# -----------------------------
-@bot.tree.command(name="add", description="Add a boss or unique monster timer")
-async def add(interaction: discord.Interaction, boss: str):
-    boss = boss.lower()
-    now = utc_now()
-    # World Boss
-    for wboss, hrs in BOSSES.items():
-        if boss == wboss.lower():
-            respawn = now + timedelta(hours=hrs)
-            boss_timers[wboss] = respawn
-            await interaction.response.send_message(f"✅ {wboss} added! Spawns at {format_time(respawn)}")
-            return
-    # Unique Monster
-    for umon in UNIQUE_MONSTERS:
-        if boss == umon.lower():
-            if umon in added_unique:
-                await interaction.response.send_message(f"⚠️ {umon} already added!")
-                return
-            spawn = now + timedelta(minutes=UNIQUE_MONSTERS[umon])
-            unique_timers[umon] = spawn
-            added_unique.add(umon)
-            await interaction.response.send_message(f"🔥 {umon} added! Spawns at {format_time(spawn)}")
-            return
-    await interaction.response.send_message("❌ Boss/Monster not found!")
-
-@bot.tree.command(name="remove", description="Remove a boss or unique monster timer")
-async def remove(interaction: discord.Interaction, boss: str):
-    boss = boss.lower()
-    removed = False
-    for wboss in list(boss_timers):
-        if boss == wboss.lower():
-            del boss_timers[wboss]
-            removed = True
-    for umon in list(added_unique):
-        if boss == umon.lower():
-            added_unique.remove(umon)
-            removed = True
-    await interaction.response.send_message("✅ Timer removed!" if removed else "❌ Nothing to remove.")
-
-@bot.tree.command(name="status", description="View pending bosses")
-async def status(interaction: discord.Interaction):
-    msg = "**Pending Bosses/Monsters:**\n"
-    if boss_timers:
-        msg += "\n**World Bosses:**\n" + "\n".join(f"{b} at {format_time(t)}" for b,t in boss_timers.items())
-    if added_unique:
-        msg += "\n**Unique Monsters:**\n" + "\n".join(f"{u} at {format_time(unique_timers[u])}" for u in added_unique)
-    if not boss_timers and not added_unique:
-        msg += "None!"
-    await interaction.response.send_message(msg)
-
-@bot.tree.command(name="help", description="Show bot usage")
+@tree.command(name="help", description="Show how to use the bot")
 async def help_cmd(interaction: discord.Interaction):
-    text = (
-        "**Commands:**\n"
-        "/add <boss_name> - Add a boss or unique monster timer\n"
-        "Example: `/add Alarak` or `/add Undomiel`\n"
-        "/remove <boss_name> - Remove a timer\n"
-        "/status - View pending bosses/monsters\n"
-        "Destroyers: Ratan, Parto, Nedra notify automatically in their time windows"
+    msg = (
+        "**📜 Boss Bot Commands:**\n"
+        "`/add <boss>` → Track a boss or unique monster.\n"
+        "`/remove <boss>` → Remove a pending boss.\n"
+        "`/status` → Show currently tracked bosses.\n\n"
+        "**Notes:**\n"
+        "- Names are not case-sensitive.\n"
+        "- Respawn bosses follow their timers.\n"
+        "- Unique monsters always 15m respawn.\n"
+        "- Destroyers (Ratan, Parto, Nedra) auto-remind once per slot.\n"
     )
-    await interaction.response.send_message(text)
+    await interaction.response.send_message(msg, ephemeral=True)
 
-# -----------------------------
-# Background Task
-# -----------------------------
-notified_world = set()
-notified_unique = set()
+@tree.command(name="add", description="Add a boss or unique monster timer")
+@app_commands.describe(name="Name of the boss")
+async def add_cmd(interaction: discord.Interaction, name: str):
+    boss = normalize(name)
+    now = ph_time_now()
 
-@tasks.loop(minutes=1)
-async def check_timers():
-    now = utc_now()
-    channel = get_channel()
-    if not channel:
+    if boss in DESTROYER_BOSSES:
+        await interaction.response.send_message(f"⚔️ {name} is a Destroyer Boss. Notifications are automatic.", ephemeral=True)
         return
 
-    # --- World Bosses ---
-    for boss, respawn in list(boss_timers.items()):
-        if boss not in notified_world and now >= respawn - timedelta(minutes=2):
-            await channel.send(f"⚔️ **{boss}** will spawn in ~2 minutes! Prepare!")
-            notified_world.add(boss)
-            del boss_timers[boss]
+    if boss in UNIQUE_MONSTERS:
+        expire = now + timedelta(minutes=15)
+        pending_bosses[boss] = expire
+        await interaction.response.send_message(f"✅ Added {name} (15m respawn).", ephemeral=True)
+        return
 
-    # --- Unique Monsters ---
-    for u in list(added_unique):
-        spawn_time = unique_timers[u]
-        if u not in notified_unique and now >= spawn_time - timedelta(minutes=1) and now < spawn_time:
-            await channel.send(f"🔥 **{u}** will spawn in ~1 minute!")
-            notified_unique.add(u)
-        if now >= spawn_time:
-            added_unique.remove(u)
-            notified_unique.discard(u)
+    if boss in RESPAWN_BOSSES:
+        expire = now + timedelta(minutes=RESPAWN_BOSSES[boss])
+        pending_bosses[boss] = expire
+        await interaction.response.send_message(f"✅ Added {name} ({RESPAWN_BOSSES[boss]}m respawn).", ephemeral=True)
+        return
 
-    # --- Destroyer Bosses ---
-    for d in DESTROYER_BOSSES:
-        windows = [(time(11,0), time(12,0)), (time(20,0), time(21,0))]
-        in_window = any(w[0] <= now.time() <= w[1] for w in windows)
-        if in_window and d not in destroyer_notified:
-            await channel.send(f"💀 **{d}** is active now!")
-            destroyer_notified.add(d)
-        if not in_window and d in destroyer_notified:
-            destroyer_notified.remove(d)
+    if boss in SCHEDULED_BOSSES:
+        await interaction.response.send_message(f"🕑 {name} is a scheduled boss. It will notify automatically.", ephemeral=True)
+        return
 
-# -----------------------------
-# Bot Ready
-# -----------------------------
+    await interaction.response.send_message(f"❌ Unknown boss: {name}", ephemeral=True)
+
+@tree.command(name="remove", description="Remove a boss from tracking")
+async def remove_cmd(interaction: discord.Interaction, name: str):
+    boss = normalize(name)
+    if boss in pending_bosses:
+        pending_bosses.pop(boss)
+        await interaction.response.send_message(f"🗑️ Removed {name} from pending.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"❌ {name} not found in pending list.", ephemeral=True)
+
+@tree.command(name="status", description="Show pending bosses")
+async def status_cmd(interaction: discord.Interaction):
+    if not pending_bosses:
+        await interaction.response.send_message("📭 No pending bosses right now.", ephemeral=True)
+        return
+
+    now = ph_time_now()
+    lines = []
+    for boss, expire in pending_bosses.items():
+        mins = int((expire - now).total_seconds() // 60)
+        if mins > 0:
+            lines.append(f"- {boss.title()} (in {mins}m)")
+    msg = "\n".join(lines) if lines else "📭 No active pending bosses."
+    await interaction.response.send_message(msg, ephemeral=True)
+
+# ---------------- Background Tasks ---------------- #
+
+@tasks.loop(minutes=1)
+async def reminder_loop():
+    channel = bot.get_channel(CHANNEL_ID)
+    now = ph_time_now()
+
+    # Check pending bosses
+    expired = []
+    for boss, expire in pending_bosses.items():
+        if now >= expire:
+            await channel.send(f"⏰ **{boss.title()}** has respawned!")
+            expired.append(boss)
+    for boss in expired:
+        pending_bosses.pop(boss, None)
+
+    # Check scheduled bosses (notify only if within 2–3 hours)
+    weekday = now.strftime("%A").lower()
+    for boss, schedules in SCHEDULED_BOSSES.items():
+        for day, t in schedules:
+            if weekday == day:
+                h, m = map(int, t.split(":"))
+                event_time = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                delta = (event_time - now).total_seconds() / 3600
+                if 0 < delta <= 3:
+                    key = f"{boss}-{event_time}"
+                    if key not in pending_bosses:
+                        pending_bosses[key] = event_time
+                        await channel.send(f"📢 Scheduled Boss **{boss.title()}** coming at {t}!")
+
+    # Destroyer bosses (fixed windows, notify once per slot)
+    for boss, slots in DESTROYER_BOSSES.items():
+        for start, end in slots:
+            start_h, start_m = map(int, start.split(":"))
+            end_h, end_m = map(int, end.split(":"))
+            start_time = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            end_time = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+            if start_time <= now <= end_time:
+                key = f"{boss}-{start}"
+                if key not in notified_destroyers:
+                    notified_destroyers.add(key)
+                    await channel.send(f"🔥 Destroyer Boss **{boss.title()}** active between {start} - {end}!")
+
+# ---------------- Events ---------------- #
+
 @bot.event
 async def on_ready():
+    await tree.sync(guild=discord.Object(id=GUILD_ID))
+    reminder_loop.start()
     print(f"✅ Logged in as {bot.user}")
-    await bot.tree.sync()
-    if not check_timers.is_running():
-        check_timers.start()
 
-# -----------------------------
-# Run Flask + Bot
-# -----------------------------
-if __name__ == "__main__":
-    from threading import Thread
-    Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
-    bot.run(TOKEN)
+# ---------------- Run ---------------- #
+
+bot.run(TOKEN)
