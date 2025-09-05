@@ -1,10 +1,10 @@
-# main.py — complete rebuild with all bosses/uniques, slash commands, autocomplete, keep-alive
+# main.py — Final: full boss lists, slash commands, autocomplete, keep-alive, unique auto-clean (30m)
 import os
 import re
 import threading
 import asyncio
 from datetime import datetime, timedelta, timezone, time as dtime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import discord
 from discord import app_commands
@@ -47,10 +47,9 @@ threading.Thread(target=run_flask, daemon=True).start()
 # Bot & intents
 # -----------------------
 intents = discord.Intents.default()
-# Slash commands do not require message_content intent; keep minimal to avoid privileged intent errors
+# Keep minimal privileged intents to avoid permission issues; slash commands don't need message_content
 bot = commands.Bot(command_prefix="!", intents=intents)
-# use built-in command tree (bot.tree)
-# remove default help so we can use '/guide' as our help UI
+# remove default help
 try:
     bot.remove_command("help")
 except Exception:
@@ -60,7 +59,6 @@ except Exception:
 # Raw lists (display names & source)
 # -----------------------
 WORLD_BOSSES_RAW = {
-    # existing / provided world bosses with their spawn hours
     "Venatus": 10, "Viorent": 10, "Ego": 21, "Livera": 24, "Araneo": 21,
     "Undomiel": 24, "Lady Dalia": 18, "General Aquileus": 29, "Amentis": 29,
     "Baron Braudmore": 32, "Supore": 62, "Asta": 62, "Secreta": 62, "Ordo": 62,
@@ -80,7 +78,6 @@ SCHEDULED_BOSSES_RAW = {
     "Chailflock":[("saturday", "22:00")]
 }
 
-# Unique monsters (all have 15-minute respawn when /add is used)
 UNIQUE_RAW = [
     "Alarak", "Black Wedge", "Outlaw Kaiser", "Screaming Wings", "Suspicious Wizard",
     "Dark Apparition", "Brutal Butcher", "Corrupted Shellbug", "Secret Creation",
@@ -88,7 +85,6 @@ UNIQUE_RAW = [
     "Berserk Thardus", "Ancient Thardus", "Charging Thardus",
     "Desert Golem", "Ancient Turtle", "Protector of the Ruins", "Black Hand",
     "Ancient Protector", "Intikam", "Desert Protector",
-    # extended list you gave:
     "Blood Mother", "Decoy", "Ghost Webber", "Shadow Webber",
     "Escort Leader Maximus", "Fortuneteller Ariel", "Priest Petroca",
     "Sylandra", "Halfmoon Stone Turtle", "Cobolt Blitz Captain",
@@ -105,8 +101,8 @@ DESTROYER_RAW = ["Ratan", "Parto", "Nedra"]
 # -----------------------
 # Helpers: normalization & display mapping
 # -----------------------
-def normalize(s: str) -> str:
-    if s is None:
+def normalize(s: Optional[str]) -> str:
+    if not s:
         return ""
     s = s.lower()
     s = s.replace("’", "'")
@@ -114,12 +110,12 @@ def normalize(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-# build normalized dictionaries / maps
+# build normalized dicts and display map
 WORLD_BOSSES: Dict[str, int] = {}
 SCHEDULED_BOSSES: Dict[str, List[tuple]] = {}
 UNIQUE_MONSTERS = set()
 DESTROYER_BOSSES = set()
-DISPLAY_NAME: Dict[str, str] = {}  # normalized -> display
+DISPLAY_NAME: Dict[str, str] = {}
 
 for k, hrs in WORLD_BOSSES_RAW.items():
     nk = normalize(k)
@@ -141,19 +137,21 @@ for k in DESTROYER_RAW:
     DESTROYER_BOSSES.add(nk)
     DISPLAY_NAME[nk] = k
 
-# all keys for autocomplete
 ALL_KEYS = list(WORLD_BOSSES.keys()) + list(UNIQUE_MONSTERS) + list(SCHEDULED_BOSSES.keys()) + list(DESTROYER_BOSSES)
-ALL_DISPLAY = [DISPLAY_NAME.get(k, k.title()) for k in ALL_KEYS]
 
 # -----------------------
 # Runtime storage
-# pending: normalized -> {"display":str, "respawn":datetime (tz-aware), "kind":"world"|"unique"}
+# pending: normalized -> {"display": str, "respawn": datetime, "kind": "world"|"unique"}
+# message_cleanup: message_id -> (channel_id, expiry_datetime)  # only for unique reminders
 # -----------------------
 pending: Dict[str, Dict] = {}
 notified_scheduled = set()
 notified_destroyer = set()
+message_cleanup: Dict[int, tuple] = {}  # msg_id -> (channel_id, expiry_dt)
 
-# timezone-aware now (Philippine time, UTC+8)
+# -----------------------
+# Time helpers
+# -----------------------
 def now_ph() -> datetime:
     return datetime.now(timezone.utc).astimezone(TZ)
 
@@ -164,20 +162,25 @@ def make_respawn_minutes(m: int) -> datetime:
     return now_ph() + timedelta(minutes=m)
 
 # -----------------------
-# send helper
+# send helper (returns list of discord.Message)
 # -----------------------
-async def send_to_channels(text: str):
+async def send_to_channels_return(msg_text: str) -> List[discord.Message]:
+    sent = []
     for cid in CHANNEL_IDS:
         ch = bot.get_channel(cid)
         if ch:
             try:
-                await ch.send(text)
+                m = await ch.send(msg_text)
+                sent.append(m)
             except Exception:
-                # ignore individual channel errors
                 pass
+    return sent
+
+async def send_to_channels(msg_text: str):
+    await send_to_channels_return(msg_text)
 
 # -----------------------
-# Autocomplete (async)
+# Autocomplete
 # -----------------------
 async def name_autocomplete(interaction: discord.Interaction, current: str):
     cur = (current or "").lower()
@@ -206,16 +209,16 @@ async def guide(interaction: discord.Interaction):
         "`/remove Alarak` — removes it\n"
         "Destroyers (Ratan/Parto/Nedra) and scheduled bosses are automatic.\n"
     )
-    await interaction.response.send_message(text, ephemeral=True)
+    # Public response (everyone sees)
+    await interaction.response.send_message(text)
 
 @bot.tree.command(name="add", description="Add a world boss or unique monster timer")
 @app_commands.describe(name="Boss or monster name")
 @app_commands.autocomplete(name=name_autocomplete)
 async def add_cmd(interaction: discord.Interaction, name: str):
-    # name may be display name from autocomplete or typed text
     disp = name.strip()
     norm = None
-    # try match display -> normalized
+    # match display -> normalized
     for k, v in DISPLAY_NAME.items():
         if v.lower() == disp.lower():
             norm = k
@@ -227,36 +230,38 @@ async def add_cmd(interaction: discord.Interaction, name: str):
 
     # Destroyers are automatic
     if norm in DESTROYER_BOSSES:
-        await interaction.response.send_message(f"⚠️ {DISPLAY_NAME.get(norm,norm.title())} is a Destroyer — reminders are automatic.", ephemeral=True)
+        await interaction.response.send_message(f"⚠️ {DISPLAY_NAME.get(norm,norm.title())} is a Destroyer — reminders are automatic.")
         return
 
     # Unique monsters (15 minutes)
     if norm in UNIQUE_MONSTERS:
         if norm in pending:
-            await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} is already pending.", ephemeral=True)
+            await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} is already pending.")
             return
         resp = make_respawn_minutes(15)
         pending[norm] = {"display": DISPLAY_NAME[norm], "respawn": resp, "kind": "unique"}
-        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')}.", ephemeral=True)
+        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')} (in 15 min).")
+
+        # When the unique is within 1 minute, reminders_loop will send the notification.
         return
 
     # World bosses (hours)
     if norm in WORLD_BOSSES:
         if norm in pending:
-            await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} is already pending.", ephemeral=True)
+            await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} is already pending.")
             return
         hours = WORLD_BOSSES[norm]
         resp = make_respawn_hours(hours)
         pending[norm] = {"display": DISPLAY_NAME[norm], "respawn": resp, "kind": "world"}
-        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')} (in {hours}h).", ephemeral=True)
+        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')} (in {hours}h).")
         return
 
     # Scheduled bosses
     if norm in SCHEDULED_BOSSES:
-        await interaction.response.send_message(f"ℹ️ {DISPLAY_NAME.get(norm, norm.title())} is scheduled — it will be announced automatically when within ~3 hours.", ephemeral=True)
+        await interaction.response.send_message(f"ℹ️ {DISPLAY_NAME.get(norm, norm.title())} is scheduled — it will be announced automatically when within ~3 hours.")
         return
 
-    await interaction.response.send_message(f"❌ Unknown boss/monster: `{name}` — try autocomplete.", ephemeral=True)
+    await interaction.response.send_message(f"❌ Unknown boss/monster: `{name}` — try autocomplete.")
 
 @bot.tree.command(name="remove", description="Remove a world/unique timer you added")
 @app_commands.describe(name="Boss or monster name")
@@ -272,13 +277,14 @@ async def remove_cmd(interaction: discord.Interaction, name: str):
         norm = normalize(disp)
 
     if norm in pending:
+        # if there are cleanup messages for this pending item we will not directly know them
+        # but they are message-specific and will naturally expire or be cleaned by message_cleanup
         pending.pop(norm, None)
-        # clear any notify flags if present (so future adds are fresh)
         notified_scheduled.discard(norm)
         notified_destroyer.discard(norm)
-        await interaction.response.send_message(f"✅ Removed {DISPLAY_NAME.get(norm, norm.title())} from pending.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Removed {DISPLAY_NAME.get(norm, norm.title())} from pending.")
     else:
-        await interaction.response.send_message(f"❌ {DISPLAY_NAME.get(norm, norm.title())} is not pending.", ephemeral=True)
+        await interaction.response.send_message(f"❌ {DISPLAY_NAME.get(norm, norm.title())} is not pending.")
 
 @bot.tree.command(name="status", description="Show pending timers and scheduled bosses within ~3 hours")
 async def status_cmd(interaction: discord.Interaction):
@@ -316,7 +322,8 @@ async def status_cmd(interaction: discord.Interaction):
     else:
         lines.append("**Scheduled (within 3 hrs)**: none")
 
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    # Public response (everyone sees)
+    await interaction.response.send_message("\n".join(lines))
 
 # -----------------------
 # Background reminders loop (1 minute)
@@ -330,7 +337,9 @@ async def reminders_loop():
         if info["kind"] == "world":
             resp = info["respawn"]
             if now >= resp - timedelta(minutes=2):
-                await send_to_channels(f"⚔️ **{info['display']}** will spawn in ~2 minutes! Prepare!")
+                text = f"⚔️ **{info['display']}** will spawn in ~2 minutes! Prepare!"
+                await send_to_channels(text)
+                # remove one-time pending entry
                 pending.pop(key, None)
 
     # 2) Unique monsters: notify ~1 minute before respawn then remove
@@ -339,8 +348,13 @@ async def reminders_loop():
             resp = info["respawn"]
             # 1-minute warning
             if now >= resp - timedelta(minutes=1) and now < resp:
-                await send_to_channels(f"🔥 **{info['display']}** will spawn in ~1 minute! Get ready!")
-            # expire
+                text = f"🔥 **{info['display']}** will spawn in ~1 minute! Get ready!"
+                messages = await send_to_channels_return(text)
+                # schedule auto-cleanup for these message objects only (30 minutes)
+                expiry = now + timedelta(minutes=30)
+                for m in messages:
+                    message_cleanup[m.id] = (m.channel.id, expiry)
+            # expire (if time passed)
             if now >= resp:
                 pending.pop(key, None)
 
@@ -355,7 +369,8 @@ async def reminders_loop():
             delta_h = (event_dt - now).total_seconds() / 3600
             event_key = f"{boss_key}-{event_dt.date()}-{hhmm}"
             if 0 < delta_h <= 3 and event_key not in notified_scheduled:
-                await send_to_channels(f"📢 Scheduled Boss **{DISPLAY_NAME.get(boss_key,boss_key.title())}** is coming at {hhmm} (in {delta_h:.1f} hr).")
+                text = f"📢 Scheduled Boss **{DISPLAY_NAME.get(boss_key,boss_key.title())}** is coming at {hhmm} (in {delta_h:.1f} hr)."
+                await send_to_channels(text)
                 notified_scheduled.add(event_key)
 
     # 4) Destroyer windows: notify once per window per day
@@ -366,12 +381,31 @@ async def reminders_loop():
             end_dt = now.replace(hour=end_t.hour, minute=end_t.minute, second=0, microsecond=0)
             window_key = f"{boss_norm}-{start_dt.date()}-{start_t.strftime('%H%M')}"
             if start_dt <= now <= end_dt and window_key not in notified_destroyer:
-                await send_to_channels(f"💀 **{DISPLAY_NAME.get(boss_norm,boss_norm.title())}** is active now ({start_t.strftime('%I:%M %p')}-{end_t.strftime('%I:%M %p')}).")
+                text = f"💀 **{DISPLAY_NAME.get(boss_norm,boss_norm.title())}** is active now ({start_t.strftime('%I:%M %p')}-{end_t.strftime('%I:%M %p')})."
+                await send_to_channels(text)
                 notified_destroyer.add(window_key)
-            # clean up old keys (optional) — nothing needed here; keys are date-specific
 
 # -----------------------
-# On ready: sync slash commands & start loop
+# Background cleanup loop (1 minute) for unique messages only
+# -----------------------
+@tasks.loop(minutes=1)
+async def cleanup_loop():
+    now = now_ph()
+    expired = [mid for mid, (_, expiry) in message_cleanup.items() if expiry <= now]
+    for mid in expired:
+        ch_id, _ = message_cleanup.get(mid, (None, None))
+        if ch_id:
+            ch = bot.get_channel(ch_id)
+            if ch:
+                try:
+                    m = await ch.fetch_message(mid)
+                    await m.delete()
+                except Exception:
+                    pass
+        message_cleanup.pop(mid, None)
+
+# -----------------------
+# On ready: sync slash commands & start loops
 # -----------------------
 @bot.event
 async def on_ready():
@@ -387,6 +421,8 @@ async def on_ready():
 
     if not reminders_loop.is_running():
         reminders_loop.start()
+    if not cleanup_loop.is_running():
+        cleanup_loop.start()
     print(f"✅ Logged in as {bot.user} (UTC+8 used)")
 
 # -----------------------
