@@ -2,171 +2,145 @@ import os
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta
-import pytz
 
-# Intents
+# -------- Intents --------
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
+intents.guilds = True
+intents.members = True  # only needed if you check members
 
-# Bot setup
 bot = commands.Bot(command_prefix="/", intents=intents)
 
-# Boss respawn times (minutes)
-BOSS_RESPAWN = {
-    # Normal bosses
-    "supore": 62, "asta": 62, "secreta": 62, "ordo": 62,
-    "gareth": 32, "shuliar": 35, "larba": 35, "catena": 35,
-    "titore": 37, "duplican": 48, "metus": 48, "wannitas": 48,
+# -------- Config --------
+CHANNEL_IDS = [int(cid) for cid in os.getenv("CHANNELS", "").split(",") if cid]  
+# Example: set CHANNELS="123456789012345678,987654321098765432" in Render
 
-    # Unique monsters (always 15 mins)
-    "blood mother": 15, "decoy": 15, "ghost webber": 15, "shadow webber": 15,
-    "escort leader maximus": 15, "fortuneteller ariel": 15, "priest petroca": 15,
-    "sylandra": 15, "halfmoon stone turtle": 15, "cobolt blitz captain": 15,
-    "black wings": 15, "forgotten olive": 15, "deadman's grow": 15,
-    "cassandra": 15, "mutated scorpion": 15, "berserk higher harpy": 15,
-    "red lizardman patrol captain": 15, "lyrian": 15, "durian": 15,
-    "infected kukri": 15, "straggler brown": 15, "veridon": 15,
-    "shaug blitz captain": 15, "shaug high-ranking wizard": 15,
-    "shaug patrol captain": 15, "elder lich": 15, "catena's eye": 15,
-    "elder scorpius": 15, "catena's servant": 15, "catena's cry": 15,
-    "catena's ego": 15, "catena's rage": 15, "catena's sorrow": 15,
+DESTROYER_BOSSES = {"Ratan", "Parto", "Nedra"}
+unique_bosses = {
+    "Blood Mother", "Decoy", "Ghost Webber", "Shadow Webber",
+    "Escort Leader Maximus", "Fortuneteller Ariel", "Priest Petroca",
+    "Sylandra", "Halfmoon Stone Turtle", "Cobolt Blitz Captain",
+    "Black Wings", "Forgotten Olive", "Deadman's Grow", "Cassandra",
+    "Mutated Scorpion", "Berserk Higher Harpy", "Red Lizardman Patrol Captain",
+    "Lyrian", "Durian", "Infected Kukri", "Straggler Brown", "Veridon",
+    "Shaug Blitz Captain", "Shaug High-Ranking Wizard", "Shaug Patrol Captain",
+    "Elder Lich", "Catena's Eye", "Elder Scorpius", "Catena's Servant",
+    "Catena's Cry", "Catena's Ego", "Catena's Rage", "Catena's Sorrow",
 }
 
-# Destroyer bosses (no respawn timer, notify once only)
-DESTROYERS = {"ratan", "parto", "nedra"}
-
-# Scheduled bosses (weekly fixed spawns)
-SCHEDULED_BOSSES = {
-    "clemantis": [("monday", "11:30"), ("thursday", "19:00")],
-    "saphirus": [("sunday", "17:00"), ("tuesday", "11:30")],
-    "neutro": [("tuesday", "19:00"), ("thursday", "11:30")],
-    "thymele": [("monday", "19:00"), ("wednesday", "11:30")],
-    "milavy": [("saturday", "15:00")],
-    "ringor": [("saturday", "17:00")],
-    "roderick": [("friday", "19:00")],
-    "auraq": [("sunday", "21:00"), ("wednesday", "21:00")],
-    "chailflock": [("saturday", "22:00")],
+scheduled_bosses = {
+    "Clemantis": [("Monday", "11:30"), ("Thursday", "19:00")],
+    "Saphirus": [("Sunday", "17:00"), ("Tuesday", "11:30")],
+    "Neutro": [("Tuesday", "19:00"), ("Thursday", "11:30")],
+    "Thymele": [("Monday", "19:00"), ("Wednesday", "11:30")],
+    "Milavy": [("Saturday", "15:00")],
+    "Ringor": [("Saturday", "17:00")],
+    "Roderick": [("Friday", "19:00")],
+    "Auraq": [("Sunday", "21:00"), ("Wednesday", "21:00")],
+    "Chailflock": [("Saturday", "22:00")],
 }
 
-# Channel IDs (supports multiple)
-CHANNEL_IDS = [int(cid) for cid in os.getenv("CHANNELS", "").split(",") if cid]
+pending_bosses = {}  # {boss: datetime}
 
-# Track active timers
-active_bosses = {}
-
-# Convert UTC to Manila time
-PH_TZ = pytz.timezone("Asia/Manila")
-
-
-def now_ph():
-    return datetime.now(PH_TZ)
-
-
-async def notify_channels(message: str):
-    """Send a message to all configured channels."""
-    for cid in CHANNEL_IDS:
-        channel = bot.get_channel(cid)
-        if channel:
-            await channel.send(message)
-
-
-@bot.command(name="add")
-async def add_boss(ctx, *, boss_name: str):
-    boss = boss_name.lower().strip()
-    now = now_ph()
-
-    if boss in DESTROYERS:
-        if boss in active_bosses:
-            await ctx.send(f"⚠️ {boss.title()} is already tracked.")
-        else:
-            active_bosses[boss] = None  # no respawn, just mark as notified
-            await notify_channels(f"💀 Destroyer Boss **{boss.title()}** has spawned!")
-        return
-
-    if boss in BOSS_RESPAWN:
-        if boss in active_bosses:
-            await ctx.send(f"⚠️ {boss.title()} is already being tracked.")
-        else:
-            respawn_time = now + timedelta(minutes=BOSS_RESPAWN[boss])
-            active_bosses[boss] = respawn_time
-            await notify_channels(
-                f"⚔️ Boss **{boss.title()}** added! Respawn in {BOSS_RESPAWN[boss]} mins "
-                f"at {respawn_time.strftime('%H:%M')}."
-            )
-        return
-
-    if boss in SCHEDULED_BOSSES:
-        await ctx.send(f"📅 {boss.title()} is a scheduled boss. It cannot be manually added.")
-        return
-
-    await ctx.send(f"❌ Unknown boss: `{boss_name}`")
-
-
-@bot.command(name="status")
-async def status(ctx):
-    if not active_bosses:
-        await ctx.send("✅ No pending bosses right now.")
-        return
-
-    lines = []
-    now = now_ph()
-    for boss, respawn_time in active_bosses.items():
-        if boss in DESTROYERS:
-            lines.append(f"💀 {boss.title()} (Destroyer, notified once)")
-        elif respawn_time:
-            remaining = int((respawn_time - now).total_seconds() // 60)
-            if remaining > 0:
-                lines.append(f"⚔️ {boss.title()} → {remaining} mins left (until {respawn_time.strftime('%H:%M')})")
-            else:
-                lines.append(f"⚔️ {boss.title()} → Respawned!")
-    if lines:
-        await ctx.send("📋 **Pending Bosses:**\n" + "\n".join(lines))
-
-
+# -------- Commands --------
 @bot.command(name="guide")
 async def guide(ctx):
+    """Show all available commands."""
     msg = (
-        "**🛠️ Bot Guide**\n"
-        "`/add <boss>` → Track a boss (case-insensitive)\n"
-        "`/status` → Show all pending bosses\n"
-        "Destroyer bosses (Ratan, Parto, Nedra) only notify once.\n"
-        "Unique monsters respawn every 15 mins.\n"
-        "Scheduled bosses are announced automatically near their times.\n"
+        "**Boss Bot Guide**\n\n"
+        "🔹 `/add <boss>` → Track a boss respawn (case-insensitive).\n"
+        "🔹 `/status` → Show pending bosses.\n"
+        "🔹 `/guide` → Show this help message.\n\n"
+        "🕒 Unique bosses respawn every **15 minutes**.\n"
+        "📅 Some bosses have fixed schedules.\n"
+        "💥 Destroyer bosses (Ratan, Parto, Nedra) are notified only once."
     )
     await ctx.send(msg)
 
 
-@tasks.loop(minutes=1)
-async def scheduled_check():
-    now = now_ph()
-    weekday = now.strftime("%A").lower()
+@bot.command(name="add")
+async def add(ctx, *, boss: str):
+    boss = boss.strip().title()  # case-insensitive
+    now = datetime.utcnow() + timedelta(hours=8)
+
+    # Destroyers → notify once
+    if boss in DESTROYER_BOSSES:
+        if boss in pending_bosses:
+            return
+        respawn_time = now + timedelta(minutes=15)
+        pending_bosses[boss] = respawn_time
+        for cid in CHANNEL_IDS:
+            channel = bot.get_channel(cid)
+            if channel:
+                await channel.send(f"💀 **{boss}** (Destroyer) has spawned! Respawn in 15 mins.")
+        return
+
+    # Unique bosses → 15 min respawn
+    if boss in unique_bosses:
+        respawn_time = now + timedelta(minutes=15)
+        pending_bosses[boss] = respawn_time
+        for cid in CHANNEL_IDS:
+            channel = bot.get_channel(cid)
+            if channel:
+                await channel.send(f"⚔️ **{boss}** added! Respawn in 15 mins.")
+        return
+
+    # Scheduled bosses
+    if boss in scheduled_bosses:
+        for cid in CHANNEL_IDS:
+            channel = bot.get_channel(cid)
+            if channel:
+                await channel.send(f"📅 **{boss}** is a scheduled boss. Use `/status` to see times.")
+        return
+
+
+@bot.command(name="status")
+async def status(ctx):
+    """Show pending bosses."""
+    now = datetime.utcnow() + timedelta(hours=8)
+    active = [f"{boss} → respawns at {time.strftime('%H:%M')}" 
+              for boss, time in pending_bosses.items() if time > now]
+
+    # Scheduled bosses (only 2–3 hours near)
+    today = now.strftime("%A")
     current_time = now.strftime("%H:%M")
+    nearby = []
+    for boss, times in scheduled_bosses.items():
+        for day, t in times:
+            if day == today:
+                boss_time = datetime.strptime(t, "%H:%M").time()
+                check_time = now.replace(hour=boss_time.hour, minute=boss_time.minute, second=0)
+                if timedelta(hours=-2) <= (check_time - now) <= timedelta(hours=3):
+                    nearby.append(f"{boss} → {day} {t}")
 
-    for boss, schedules in SCHEDULED_BOSSES.items():
-        for day, sched_time in schedules:
-            if weekday == day and current_time == sched_time:
-                await notify_channels(f"📅 Scheduled Boss **{boss.title()}** is spawning now!")
+    msg = "**📊 Pending Bosses:**\n"
+    msg += "\n".join(active) if active else "None right now."
+    msg += "\n\n**📅 Nearby Scheduled Bosses (2–3 hrs):**\n"
+    msg += "\n".join(nearby) if nearby else "None upcoming."
+    await ctx.send(msg)
 
 
-@tasks.loop(minutes=1)
-async def respawn_check():
-    now = now_ph()
+# -------- Background Task --------
+@tasks.loop(seconds=60)
+async def check_respawns():
+    now = datetime.utcnow() + timedelta(hours=8)
     expired = []
-    for boss, respawn_time in active_bosses.items():
-        if respawn_time and now >= respawn_time:
-            await notify_channels(f"⚔️ Boss **{boss.title()}** has respawned!")
+    for boss, respawn_time in pending_bosses.items():
+        if now >= respawn_time:
+            for cid in CHANNEL_IDS:
+                channel = bot.get_channel(cid)
+                if channel:
+                    await channel.send(f"🔔 **{boss}** has respawned!")
             expired.append(boss)
     for boss in expired:
-        del active_bosses[boss]
+        del pending_bosses[boss]
 
 
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    scheduled_check.start()
-    respawn_check.start()
+    check_respawns.start()
 
 
-# Run bot
+# -------- Run --------
 bot.run(os.getenv("DISCORD_TOKEN"))
