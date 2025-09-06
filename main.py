@@ -1,4 +1,4 @@
-# main.py — Boss bot final version with full lists, slash commands, keep-alive, unique auto-clean
+# main.py — Final Boss Bot: full bosses, slash commands, autocomplete, keep-alive, unique auto-clean (30m)
 import os
 import re
 import threading
@@ -16,15 +16,15 @@ from flask import Flask
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN")
 CHANNELS_ENV = os.getenv("CHANNELS", "")  # e.g. "123456789012345678,987654321098765432"
 CHANNEL_IDS: List[int] = [int(x) for x in CHANNELS_ENV.split(",") if x.strip().isdigit()]
-GUILD_RAW = os.getenv("GUILD_ID")
+GUILD_RAW = os.getenv("GUILD_ID") or os.getenv("Enemies")
 GUILD_ID = int(GUILD_RAW) if GUILD_RAW and GUILD_RAW.isdigit() else None
 
 if not TOKEN:
-    raise RuntimeError("Set DISCORD_TOKEN environment variable.")
+    raise RuntimeError("Set DISCORD_TOKEN (or TOKEN) environment variable.")
 if not CHANNEL_IDS:
     raise RuntimeError("Set CHANNELS environment variable (comma-separated channel IDs).")
 
-# timezone UTC+8
+# timezone (UTC+8)
 TZ = timezone(timedelta(hours=8))
 
 # -----------------------
@@ -56,7 +56,7 @@ except Exception:
 # Boss lists
 # -----------------------
 WORLD_BOSSES_RAW = {
-    "Venatus": 10, "Viorent": 10, "Ego": 21, "Livera": 24, "Araneo": 21,
+    "Venatus": 10, "Viorent": 10, "Ego": 21, "Livera": 24, "Araneo": 24,
     "Undomiel": 24, "Lady Dalia": 18, "General Aquileus": 29, "Amentis": 29,
     "Baron Braudmore": 32, "Supore": 62, "Asta": 62, "Secreta": 62, "Ordo": 62,
     "Gareth": 32, "Shuliar": 35, "Larba": 35, "Catena": 35, "Titore": 37,
@@ -99,16 +99,18 @@ DESTROYER_RAW = ["Ratan", "Parto", "Nedra"]
 # Helpers
 # -----------------------
 def normalize(s: Optional[str]) -> str:
-    if not s: return ""
-    s = s.lower()
-    s = s.replace("’", "'")
+    if not s:
+        return ""
+    s = s.lower().replace("’","'")
     s = re.sub(r"[^a-z0-9 ]+", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-WORLD_BOSSES, SCHEDULED_BOSSES = {}, {}
-UNIQUE_MONSTERS, DESTROYER_BOSSES = set(), set()
-DISPLAY_NAME: Dict[str, str] = {}
+WORLD_BOSSES: Dict[str,int] = {}
+SCHEDULED_BOSSES: Dict[str,List[tuple]] = {}
+UNIQUE_MONSTERS = set()
+DESTROYER_BOSSES = set()
+DISPLAY_NAME: Dict[str,str] = {}
 
 for k,v in WORLD_BOSSES_RAW.items():
     nk = normalize(k)
@@ -138,11 +140,8 @@ ALL_KEYS = list(WORLD_BOSSES.keys()) + list(UNIQUE_MONSTERS) + list(SCHEDULED_BO
 pending: Dict[str, Dict] = {}
 notified_scheduled = set()
 notified_destroyer = set()
-message_cleanup: Dict[int, tuple] = {}  # msg_id -> (channel_id, expiry_dt)
+message_cleanup: Dict[int, tuple] = {}
 
-# -----------------------
-# Time helpers
-# -----------------------
 def now_ph() -> datetime:
     return datetime.now(timezone.utc).astimezone(TZ)
 
@@ -152,208 +151,199 @@ def make_respawn_hours(h: int) -> datetime:
 def make_respawn_minutes(m: int) -> datetime:
     return now_ph() + timedelta(minutes=m)
 
-# -----------------------
-# Send helpers
-# -----------------------
-async def send_to_channels(msg_text: str):
+async def send_to_channels(msg: str):
     for cid in CHANNEL_IDS:
         ch = bot.get_channel(cid)
         if ch:
-            try: await ch.send(msg_text)
+            try: await ch.send(msg)
             except: pass
 
-async def send_to_channels_return(msg_text: str):
+async def send_to_channels_return(msg: str):
     sent = []
     for cid in CHANNEL_IDS:
         ch = bot.get_channel(cid)
         if ch:
             try:
-                m = await ch.send(msg_text)
+                m = await ch.send(msg)
                 sent.append(m)
             except: pass
     return sent
 
-# -----------------------
-# Autocomplete
-# -----------------------
 async def name_autocomplete(interaction: discord.Interaction, current: str):
     cur = (current or "").lower()
     choices = []
     for k in ALL_KEYS:
-        disp = DISPLAY_NAME.get(k, k.title())
+        disp = DISPLAY_NAME.get(k,k.title())
         if cur in disp.lower() or cur in k:
-            choices.append(app_commands.Choice(name=disp, value=disp))
+            choices.append(app_commands.Choice(name=disp,value=disp))
             if len(choices) >= 25: break
     return choices
 
 # -----------------------
 # Slash commands
 # -----------------------
-@bot.tree.command(name="guide", description="Show usage & examples")
+@bot.tree.command(name="guide", description="Show quick usage & examples")
 async def guide(interaction: discord.Interaction):
     text = (
         "**Boss Bot Guide**\n\n"
-        "`/add <name>` — Add a world boss or unique (case-insensitive).\n"
+        "`/add <name>` — Add a boss or unique monster.\n"
         "`/remove <name>` — Remove a pending timer.\n"
-        "`/status` — Show pending timers & scheduled bosses within ~3 hrs.\n"
-        "Destroyers & scheduled bosses are automatic.\n"
+        "`/status` — Show pending timers & scheduled bosses for today.\n"
+        "Destroyers are automatic.\n"
     )
     await interaction.response.send_message(text)
 
-@bot.tree.command(name="add", description="Add world boss or unique")
+@bot.tree.command(name="add", description="Add a world boss or unique monster timer")
 @app_commands.describe(name="Boss or monster name")
 @app_commands.autocomplete(name=name_autocomplete)
 async def add_cmd(interaction: discord.Interaction, name: str):
     disp = name.strip()
     norm = None
     for k,v in DISPLAY_NAME.items():
-        if v.lower() == disp.lower(): norm=k; break
+        if v.lower() == disp.lower():
+            norm = k
+            break
     if not norm: norm = normalize(disp)
-
     now = now_ph()
+
     if norm in DESTROYER_BOSSES:
-        await interaction.response.send_message(f"⚠️ {DISPLAY_NAME.get(norm,norm.title())} is a Destroyer — automatic.")
+        await interaction.response.send_message(f"⚠️ {DISPLAY_NAME.get(norm,norm.title())} is a Destroyer — reminders are automatic.")
         return
 
     if norm in UNIQUE_MONSTERS:
         if norm in pending:
-            await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} already pending.")
+            await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} is already pending.")
             return
-        resp = make_respawn_minutes(1)
-        pending[norm] = {"display": DISPLAY_NAME[norm], "respawn": resp, "kind": "unique"}
-        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn in 1 min ({resp.strftime('%I:%M %p')}).")
+        resp = make_respawn_minutes(15)
+        pending[norm] = {"display":DISPLAY_NAME[norm],"respawn":resp,"kind":"unique"}
+        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')} (in 15 min).")
         return
 
     if norm in WORLD_BOSSES:
         if norm in pending:
-            await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} already pending.")
+            await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} is already pending.")
             return
-        resp = make_respawn_minutes(5)  # 5-minute for all world bosses
-        pending[norm] = {"display": DISPLAY_NAME[norm], "respawn": resp, "kind": "world"}
-        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn in 5 min ({resp.strftime('%I:%M %p')}).")
+        hours = WORLD_BOSSES[norm]
+        resp = make_respawn_hours(hours)
+        pending[norm] = {"display":DISPLAY_NAME[norm],"respawn":resp,"kind":"world"}
+        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')} (in {hours}h).")
         return
 
     if norm in SCHEDULED_BOSSES:
-        await interaction.response.send_message(f"ℹ️ {DISPLAY_NAME.get(norm,norm.title())} is scheduled — announced automatically.")
+        await interaction.response.send_message(f"ℹ️ {DISPLAY_NAME.get(norm,norm.title())} is scheduled — will be announced automatically.")
         return
 
     await interaction.response.send_message(f"❌ Unknown boss/monster: `{name}` — try autocomplete.")
 
-@bot.tree.command(name="remove", description="Remove a pending timer")
+@bot.tree.command(name="remove", description="Remove a world/unique timer you added")
 @app_commands.describe(name="Boss or monster name")
 @app_commands.autocomplete(name=name_autocomplete)
 async def remove_cmd(interaction: discord.Interaction, name: str):
     disp = name.strip()
     norm = None
     for k,v in DISPLAY_NAME.items():
-        if v.lower() == disp.lower(): norm=k; break
+        if v.lower() == disp.lower(): norm = k; break
     if not norm: norm = normalize(disp)
-
     if norm in pending:
         pending.pop(norm,None)
         notified_scheduled.discard(norm)
         notified_destroyer.discard(norm)
-        await interaction.response.send_message(f"✅ Removed {DISPLAY_NAME.get(norm,norm.title())}.")
+        await interaction.response.send_message(f"✅ Removed {DISPLAY_NAME.get(norm,norm.title())} from pending.")
     else:
-        await interaction.response.send_message(f"❌ {DISPLAY_NAME.get(norm,norm.title())} not pending.")
+        await interaction.response.send_message(f"❌ {DISPLAY_NAME.get(norm,norm.title())} is not pending.")
 
-@bot.tree.command(name="status", description="Show pending & scheduled bosses")
+@bot.tree.command(name="status", description="Show pending timers & scheduled bosses for today")
 async def status_cmd(interaction: discord.Interaction):
     now = now_ph()
     lines = []
 
-    # pending
+    # Pending added
     if pending:
-        lines.append("**Pending:**")
+        lines.append("**Pending (added)**:")
         for k, info in pending.items():
-            mins = int((info["respawn"]-now).total_seconds()//60)
-            if mins>0: lines.append(f"- {info['display']} — in {mins} min ({info['respawn'].strftime('%I:%M %p')})")
-            else: lines.append(f"- {info['display']} — due now")
+            resp = info["respawn"]
+            mins = int((resp-now).total_seconds()//60)
+            if mins>0:
+                lines.append(f"- {info['display']} — in {mins} min (at {resp.strftime('%I:%M %p')})")
+            else:
+                lines.append(f"- {info['display']} — due now")
     else:
-        lines.append("**Pending:** none")
+        lines.append("**Pending (added)**: none")
 
-    # scheduled within 3h
-    nearby=[]
+    # Scheduled bosses for today
+    today_bosses = []
     weekday = now.strftime("%A").lower()
-    for boss_key,scheds in SCHEDULED_BOSSES.items():
+    for boss_key, scheds in SCHEDULED_BOSSES.items():
         for day, hhmm in scheds:
-            if day!=weekday: continue
-            h,m=map(int,hhmm.split(":"))
-            event_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            delta_h=(event_dt-now).total_seconds()/3600
-            if 0<delta_h<=3:
-                nearby.append(f"- {DISPLAY_NAME.get(boss_key,boss_key.title())} at {hhmm} ({delta_h:.1f} hr)")
-    if nearby:
-        lines.append("**Scheduled (within 3 hrs):**")
-        lines.extend(nearby)
+            if day != weekday: continue
+            today_bosses.append(f"- {DISPLAY_NAME.get(boss_key,boss_key.title())} at {hhmm}")
+    if today_bosses:
+        lines.append("**Scheduled Bosses Today:**")
+        lines.extend(today_bosses)
     else:
-        lines.append("**Scheduled (within 3 hrs):** none")
+        lines.append("**Scheduled Bosses Today:** none")
 
     await interaction.response.send_message("\n".join(lines))
 
 # -----------------------
-# Background reminders
+# Background loops
 # -----------------------
 @tasks.loop(minutes=1)
 async def reminders_loop():
-    now=now_ph()
-
-    # World bosses (5-min warning)
-    for key,info in list(pending.items()):
+    now = now_ph()
+    # World bosses
+    for key, info in list(pending.items()):
         if info["kind"]=="world":
-            resp=info["respawn"]
-            if now>=resp-timedelta(minutes=5):
-                await send_to_channels(f"⚔️ **{info['display']}** will spawn in ~5 minutes!")
+            resp = info["respawn"]
+            if now >= resp - timedelta(minutes=2):
+                text = f"⚔️ **{info['display']}** will spawn in ~2 minutes!"
+                await send_to_channels(text)
                 pending.pop(key,None)
-
-    # Unique (1-min warning)
-    for key,info in list(pending.items()):
+    # Unique
+    for key, info in list(pending.items()):
         if info["kind"]=="unique":
-            resp=info["respawn"]
-            if now>=resp-timedelta(minutes=1) and now<resp:
-                messages = await send_to_channels_return(f"🔥 **{info['display']}** will spawn in ~1 minute!")
-                expiry = now+timedelta(minutes=30)
-                for m in messages: message_cleanup[m.id]=(m.channel.id, expiry)
-            if now>=resp:
-                pending.pop(key,None)
-
-    # Scheduled (within 3h)
-    weekday=now.strftime("%A").lower()
+            resp = info["respawn"]
+            if now >= resp - timedelta(minutes=1) and now < resp:
+                text = f"🔥 **{info['display']}** will spawn in ~1 minute!"
+                messages = await send_to_channels_return(text)
+                expiry = now + timedelta(minutes=30)
+                for m in messages: message_cleanup[m.id]=(m.channel.id,expiry)
+            if now >= resp: pending.pop(key,None)
+    # Scheduled bosses auto
+    weekday = now.strftime("%A").lower()
     for boss_key,scheds in SCHEDULED_BOSSES.items():
-        for day,hhmm in scheds:
-            if day!=weekday: continue
-            h,m=map(int,hhmm.split(":"))
-            event_dt=now.replace(hour=h, minute=m, second=0, microsecond=0)
-            delta_h=(event_dt-now).total_seconds()/3600
+        for day, hhmm in scheds:
+            if day != weekday: continue
+            h,m = map(int,hhmm.split(":"))
+            event_dt = now.replace(hour=h,minute=m,second=0,microsecond=0)
+            delta_h = (event_dt-now).total_seconds()/3600
             event_key=f"{boss_key}-{event_dt.date()}-{hhmm}"
             if 0<delta_h<=3 and event_key not in notified_scheduled:
-                await send_to_channels(f"📢 Scheduled Boss **{DISPLAY_NAME.get(boss_key,boss_key.title())}** at {hhmm} ({delta_h:.1f} hr).")
+                text=f"📢 Scheduled Boss **{DISPLAY_NAME.get(boss_key,boss_key.title())}** is coming at {hhmm} (in {delta_h:.1f} hr)."
+                await send_to_channels(text)
                 notified_scheduled.add(event_key)
-
-    # Destroyers: automatic windows
-    windows=[(dtime(11,0),dtime(12,0)),(dtime(20,0),dtime(21,0))]
+    # Destroyers
+    windows = [(dtime(11,0),dtime(12,0)),(dtime(20,0),dtime(21,0))]
     for boss_norm in DESTROYER_BOSSES:
         for start_t,end_t in windows:
-            start_dt=now.replace(hour=start_t.hour,minute=start_t.minute,second=0,microsecond=0)
-            end_dt=now.replace(hour=end_t.hour,minute=end_t.minute,second=0,microsecond=0)
+            start_dt = now.replace(hour=start_t.hour,minute=start_t.minute,second=0,microsecond=0)
+            end_dt = now.replace(hour=end_t.hour,minute=end_t.minute,second=0,microsecond=0)
             window_key=f"{boss_norm}-{start_dt.date()}-{start_t.strftime('%H%M')}"
             if start_dt<=now<=end_dt and window_key not in notified_destroyer:
-                await send_to_channels(f"💀 **{DISPLAY_NAME.get(boss_norm,boss_norm.title())}** is active now ({start_t.strftime('%I:%M %p')}-{end_t.strftime('%I:%M %p')}).")
+                text=f"💀 **{DISPLAY_NAME.get(boss_norm,boss_norm.title())}** is active now ({start_t.strftime('%I:%M %p')}-{end_t.strftime('%I:%M %p')})."
+                await send_to_channels(text)
                 notified_destroyer.add(window_key)
 
-# -----------------------
-# Cleanup unique messages
-# -----------------------
 @tasks.loop(minutes=1)
 async def cleanup_loop():
-    now=now_ph()
-    expired=[mid for mid,(_,expiry) in message_cleanup.items() if expiry<=now]
+    now = now_ph()
+    expired = [mid for mid,(_,expiry) in message_cleanup.items() if expiry<=now]
     for mid in expired:
-        ch_id,_=message_cleanup.get(mid,(None,None))
+        ch_id,_ = message_cleanup.get(mid,(None,None))
         if ch_id:
-            ch=bot.get_channel(ch_id)
+            ch = bot.get_channel(ch_id)
             if ch:
-                try: await (await ch.fetch_message(mid)).delete()
+                try: m = await ch.fetch_message(mid); await m.delete()
                 except: pass
         message_cleanup.pop(mid,None)
 
@@ -365,10 +355,10 @@ async def on_ready():
     try:
         if GUILD_ID:
             await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-            print(f"🔗 Synced commands to guild {GUILD_ID}")
+            print(f"🔗 Synced slash commands to guild {GUILD_ID}")
         else:
             await bot.tree.sync()
-            print("🔗 Synced global commands")
+            print("🔗 Synced global slash commands")
     except Exception as e:
         print("⚠️ Slash sync failed:", e)
     if not reminders_loop.is_running(): reminders_loop.start()
