@@ -1,4 +1,4 @@
-# main.py — Final: full boss lists, slash commands, autocomplete, keep-alive, unique auto-clean (30m)
+# main.py — Final complete bot
 import os
 import re
 import threading
@@ -12,7 +12,7 @@ from discord.ext import commands, tasks
 from flask import Flask
 
 # -----------------------
-# Environment / config
+# ENV / CONFIG
 # -----------------------
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN")
 CHANNELS_ENV = os.getenv("CHANNELS", "")  # e.g. "123456789012345678,987654321098765432"
@@ -21,15 +21,15 @@ GUILD_RAW = os.getenv("GUILD_ID") or os.getenv("Enemies")
 GUILD_ID = int(GUILD_RAW) if GUILD_RAW and GUILD_RAW.isdigit() else None
 
 if not TOKEN:
-    raise RuntimeError("Set DISCORD_TOKEN (or TOKEN) environment variable.")
+    raise RuntimeError("Set DISCORD_TOKEN (or TOKEN) env var.")
 if not CHANNEL_IDS:
-    raise RuntimeError("Set CHANNELS environment variable (comma-separated channel IDs).")
+    raise RuntimeError("Set CHANNELS env var to comma-separated channel IDs.")
 
-# timezone (UTC+8)
+# use PH time (UTC+8)
 TZ = timezone(timedelta(hours=8))
 
 # -----------------------
-# Flask keep-alive (Render expects a bound port for web services)
+# Flask keep-alive (for Render web service)
 # -----------------------
 flask_app = Flask("keepalive")
 
@@ -47,16 +47,16 @@ threading.Thread(target=run_flask, daemon=True).start()
 # Bot & intents
 # -----------------------
 intents = discord.Intents.default()
-# Keep minimal privileged intents to avoid permission issues; slash commands don't need message_content
+# slash commands don't need message_content; keep minimal
 bot = commands.Bot(command_prefix="!", intents=intents)
-# remove default help
+# remove default help to avoid conflict
 try:
     bot.remove_command("help")
 except Exception:
     pass
 
 # -----------------------
-# Raw lists (display names & source)
+# Boss Lists (from your requests)
 # -----------------------
 WORLD_BOSSES_RAW = {
     "Venatus": 10, "Viorent": 10, "Ego": 21, "Livera": 24, "Araneo": 21,
@@ -99,18 +99,17 @@ UNIQUE_RAW = [
 DESTROYER_RAW = ["Ratan", "Parto", "Nedra"]
 
 # -----------------------
-# Helpers: normalization & display mapping
+# Normalization & display mapping
 # -----------------------
 def normalize(s: Optional[str]) -> str:
     if not s:
         return ""
     s = s.lower()
     s = s.replace("’", "'")
-    s = re.sub(r"[^a-z0-9 ]+", "", s)  # remove punctuation
+    s = re.sub(r"[^a-z0-9 ]+", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-# build normalized dicts and display map
 WORLD_BOSSES: Dict[str, int] = {}
 SCHEDULED_BOSSES: Dict[str, List[tuple]] = {}
 UNIQUE_MONSTERS = set()
@@ -141,16 +140,16 @@ ALL_KEYS = list(WORLD_BOSSES.keys()) + list(UNIQUE_MONSTERS) + list(SCHEDULED_BO
 
 # -----------------------
 # Runtime storage
-# pending: normalized -> {"display": str, "respawn": datetime, "kind": "world"|"unique"}
-# message_cleanup: message_id -> (channel_id, expiry_datetime)  # only for unique reminders
 # -----------------------
+# pending: normalized -> {"display", "respawn": dt, "kind": "world"|"unique", "messages": [msg_id,...]}
 pending: Dict[str, Dict] = {}
 notified_scheduled = set()
 notified_destroyer = set()
-message_cleanup: Dict[int, tuple] = {}  # msg_id -> (channel_id, expiry_dt)
+# message_cleanup: msg_id -> (channel_id, expiry_dt)
+message_cleanup: Dict[int, tuple] = {}
 
 # -----------------------
-# Time helpers
+# Time helpers (PH time)
 # -----------------------
 def now_ph() -> datetime:
     return datetime.now(timezone.utc).astimezone(TZ)
@@ -162,25 +161,28 @@ def make_respawn_minutes(m: int) -> datetime:
     return now_ph() + timedelta(minutes=m)
 
 # -----------------------
-# send helper (returns list of discord.Message)
+# Channel send helpers (with logging)
 # -----------------------
 async def send_to_channels_return(msg_text: str) -> List[discord.Message]:
     sent = []
     for cid in CHANNEL_IDS:
         ch = bot.get_channel(cid)
-        if ch:
-            try:
-                m = await ch.send(msg_text)
-                sent.append(m)
-            except Exception:
-                pass
+        if not ch:
+            print(f"⚠️ Channel not found/cached: {cid}")
+            continue
+        try:
+            m = await ch.send(msg_text)
+            sent.append(m)
+            print(f"✅ Sent message to channel {cid} (msg.id={m.id})")
+        except Exception as e:
+            print(f"❌ Failed to send to {cid}: {e}")
     return sent
 
 async def send_to_channels(msg_text: str):
     await send_to_channels_return(msg_text)
 
 # -----------------------
-# Autocomplete
+# Autocomplete helper
 # -----------------------
 async def name_autocomplete(interaction: discord.Interaction, current: str):
     cur = (current or "").lower()
@@ -194,31 +196,48 @@ async def name_autocomplete(interaction: discord.Interaction, current: str):
     return choices
 
 # -----------------------
+# Parse PH time "HH:MM" into a datetime in PH timezone
+# Rules:
+#  - If tod is today and <= now -> use today at tod
+#  - If tod > now (i.e. future today) assume time was yesterday (player reported kill before midnight)
+#  - If parsing fails, return None
+# -----------------------
+def parse_ph_tod(tod_text: str) -> Optional[datetime]:
+    try:
+        now = now_ph()
+        hh, mm = map(int, tod_text.split(":"))
+        candidate = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        # if candidate is in the future (later today), assume death was yesterday
+        if candidate > now:
+            candidate = candidate - timedelta(days=1)
+        return candidate
+    except Exception:
+        return None
+
+# -----------------------
 # Slash commands
 # -----------------------
 @bot.tree.command(name="guide", description="Show quick usage & examples")
 async def guide(interaction: discord.Interaction):
     text = (
         "**Boss Bot Guide**\n\n"
-        "`/add <name>` — Add a boss or unique monster (case-insensitive).\n"
-        "`/remove <name>` — Remove a pending timer you added.\n"
-        "`/status` — See pending timers and scheduled bosses within ~3 hours.\n\n"
+        "`/add <name> [HH:MM]` — Add a boss (optional PH-time time-of-death HH:MM). If no time provided, uses now.\n"
+        "`/remove <name>` — Remove pending timer you added.\n"
+        "`/status` — Show all pending timers and scheduled bosses within ~3 hours.\n\n"
         "Examples:\n"
-        "`/add Alarak` — adds unique (15m)\n"
-        "`/add Venatus` — adds world boss (10h)\n"
-        "`/remove Alarak` — removes it\n"
-        "Destroyers (Ratan/Parto/Nedra) and scheduled bosses are automatic.\n"
+        "`/add Alarak` — log unique (uses now)\n"
+        "`/add Alarak 14:30` — log unique with PH time-of-death 14:30\n"
+        "`/add Venatus 13:10` — log world boss with TOD (respawn = TOD + 10 hours)\n"
     )
-    # Public response (everyone sees)
     await interaction.response.send_message(text)
 
-@bot.tree.command(name="add", description="Add a world boss or unique monster timer")
-@app_commands.describe(name="Boss or monster name")
+@bot.tree.command(name="add", description="Add a world boss or unique monster timer (optionally include PH time-of-death HH:MM)")
+@app_commands.describe(name="Boss or monster name", tod="optional time of death in HH:MM (PH time)")
 @app_commands.autocomplete(name=name_autocomplete)
-async def add_cmd(interaction: discord.Interaction, name: str):
+async def add_cmd(interaction: discord.Interaction, name: str, tod: Optional[str] = None):
     disp = name.strip()
-    norm = None
     # match display -> normalized
+    norm = None
     for k, v in DISPLAY_NAME.items():
         if v.lower() == disp.lower():
             norm = k
@@ -228,21 +247,30 @@ async def add_cmd(interaction: discord.Interaction, name: str):
 
     now = now_ph()
 
-    # Destroyers are automatic
+    # Destroyers: can't be added manually (auto windows)
     if norm in DESTROYER_BOSSES:
-        await interaction.response.send_message(f"⚠️ {DISPLAY_NAME.get(norm,norm.title())} is a Destroyer — reminders are automatic.")
+        await interaction.response.send_message(f"⚠️ {DISPLAY_NAME.get(norm,norm.title())} is a Destroyer — reminders run automatically.")
         return
 
-    # Unique monsters (15 minutes)
+    # Determine death time (TOD)
+    if tod:
+        tod_dt = parse_ph_tod(tod)
+        if not tod_dt:
+            await interaction.response.send_message("❌ Invalid TOD format. Use HH:MM (PH time).")
+            return
+        death_time = tod_dt
+    else:
+        death_time = now
+
+    # Unique monsters (15 minutes respawn)
     if norm in UNIQUE_MONSTERS:
         if norm in pending:
             await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} is already pending.")
             return
-        resp = make_respawn_minutes(15)
-        pending[norm] = {"display": DISPLAY_NAME[norm], "respawn": resp, "kind": "unique"}
-        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')} (in 15 min).")
-
-        # When the unique is within 1 minute, reminders_loop will send the notification.
+        resp = death_time + timedelta(minutes=15)
+        pending[norm] = {"display": DISPLAY_NAME[norm], "respawn": resp, "kind": "unique", "messages": []}
+        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')} (PH).")
+        print(f"[add] unique {DISPLAY_NAME[norm]} added, respawn {resp.isoformat()}")
         return
 
     # World bosses (hours)
@@ -251,19 +279,20 @@ async def add_cmd(interaction: discord.Interaction, name: str):
             await interaction.response.send_message(f"⚠️ {DISPLAY_NAME[norm]} is already pending.")
             return
         hours = WORLD_BOSSES[norm]
-        resp = make_respawn_hours(hours)
-        pending[norm] = {"display": DISPLAY_NAME[norm], "respawn": resp, "kind": "world"}
-        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')} (in {hours}h).")
+        resp = death_time + timedelta(hours=hours)
+        pending[norm] = {"display": DISPLAY_NAME[norm], "respawn": resp, "kind": "world", "messages": []}
+        await interaction.response.send_message(f"✅ {DISPLAY_NAME[norm]} added — respawn at {resp.strftime('%I:%M %p')} (PH) (in {hours}h).")
+        print(f"[add] world {DISPLAY_NAME[norm]} added, respawn {resp.isoformat()}")
         return
 
-    # Scheduled bosses
+    # Scheduled bosses: inform user
     if norm in SCHEDULED_BOSSES:
-        await interaction.response.send_message(f"ℹ️ {DISPLAY_NAME.get(norm, norm.title())} is scheduled — it will be announced automatically when within ~3 hours.")
+        await interaction.response.send_message(f"ℹ️ {DISPLAY_NAME.get(norm, norm.title())} is scheduled — it will be announced automatically when near spawn time.")
         return
 
     await interaction.response.send_message(f"❌ Unknown boss/monster: `{name}` — try autocomplete.")
 
-@bot.tree.command(name="remove", description="Remove a world/unique timer you added")
+@bot.tree.command(name="remove", description="Remove a pending world/unique timer you added")
 @app_commands.describe(name="Boss or monster name")
 @app_commands.autocomplete(name=name_autocomplete)
 async def remove_cmd(interaction: discord.Interaction, name: str):
@@ -277,8 +306,19 @@ async def remove_cmd(interaction: discord.Interaction, name: str):
         norm = normalize(disp)
 
     if norm in pending:
-        # if there are cleanup messages for this pending item we will not directly know them
-        # but they are message-specific and will naturally expire or be cleaned by message_cleanup
+        # delete any posted reminder messages associated with this boss (unique messages stored)
+        msgs = pending[norm].get("messages", [])
+        for mid in msgs:
+            ch_id, _ = message_cleanup.get(mid, (None, None))
+            if ch_id:
+                ch = bot.get_channel(ch_id)
+                if ch:
+                    try:
+                        m = await ch.fetch_message(mid)
+                        await m.delete()
+                    except Exception:
+                        pass
+            message_cleanup.pop(mid, None)
         pending.pop(norm, None)
         notified_scheduled.discard(norm)
         notified_destroyer.discard(norm)
@@ -291,7 +331,7 @@ async def status_cmd(interaction: discord.Interaction):
     now = now_ph()
     lines = []
 
-    # Pending added (world & unique)
+    # Pending (added)
     if pending:
         lines.append("**Pending (added)**:")
         for k, info in pending.items():
@@ -304,7 +344,7 @@ async def status_cmd(interaction: discord.Interaction):
     else:
         lines.append("**Pending (added)**: none")
 
-    # Scheduled: only show today's ones within 3 hours
+    # Scheduled within 3 hours (today)
     nearby = []
     weekday = now.strftime("%A").lower()
     for boss_key, scheds in SCHEDULED_BOSSES.items():
@@ -315,14 +355,13 @@ async def status_cmd(interaction: discord.Interaction):
             event_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
             delta_h = (event_dt - now).total_seconds() / 3600
             if 0 < delta_h <= 3:
-                nearby.append(f"- {DISPLAY_NAME.get(boss_key, boss_key.title())} at {hhmm} (in {delta_h:.1f} hr)")
+                nearby.append(f"- {DISPLAY_NAME.get(boss_key,boss_key.title())} at {hhmm} (in {delta_h:.1f} hr)")
     if nearby:
         lines.append("**Scheduled (within 3 hrs)**:")
         lines.extend(nearby)
     else:
         lines.append("**Scheduled (within 3 hrs)**: none")
 
-    # Public response (everyone sees)
     await interaction.response.send_message("\n".join(lines))
 
 # -----------------------
@@ -339,22 +378,22 @@ async def reminders_loop():
             if now >= resp - timedelta(minutes=2):
                 text = f"⚔️ **{info['display']}** will spawn in ~2 minutes! Prepare!"
                 await send_to_channels(text)
-                # remove one-time pending entry
                 pending.pop(key, None)
 
     # 2) Unique monsters: notify ~1 minute before respawn then remove
     for key, info in list(pending.items()):
         if info["kind"] == "unique":
             resp = info["respawn"]
-            # 1-minute warning
+            # 1-minute warning: post reminder messages and track them for cleanup
             if now >= resp - timedelta(minutes=1) and now < resp:
                 text = f"🔥 **{info['display']}** will spawn in ~1 minute! Get ready!"
                 messages = await send_to_channels_return(text)
-                # schedule auto-cleanup for these message objects only (30 minutes)
                 expiry = now + timedelta(minutes=30)
+                # record message ids both in global cleanup and in pending map (so /remove can delete them)
                 for m in messages:
                     message_cleanup[m.id] = (m.channel.id, expiry)
-            # expire (if time passed)
+                    pending[key].setdefault("messages", []).append(m.id)
+            # expire pending entry after spawn time passes
             if now >= resp:
                 pending.pop(key, None)
 
@@ -373,7 +412,7 @@ async def reminders_loop():
                 await send_to_channels(text)
                 notified_scheduled.add(event_key)
 
-    # 4) Destroyer windows: notify once per window per day
+    # 4) Destroyer windows: notify once per window per day (11:00-12:00 and 20:00-21:00)
     windows = [(dtime(11, 0), dtime(12, 0)), (dtime(20, 0), dtime(21, 0))]
     for boss_norm in DESTROYER_BOSSES:
         for start_t, end_t in windows:
@@ -386,7 +425,7 @@ async def reminders_loop():
                 notified_destroyer.add(window_key)
 
 # -----------------------
-# Background cleanup loop (1 minute) for unique messages only
+# Background cleanup loop (1 minute)
 # -----------------------
 @tasks.loop(minutes=1)
 async def cleanup_loop():
@@ -400,12 +439,13 @@ async def cleanup_loop():
                 try:
                     m = await ch.fetch_message(mid)
                     await m.delete()
+                    print(f"🗑 Deleted cleaned-up message {mid} in channel {ch_id}")
                 except Exception:
                     pass
         message_cleanup.pop(mid, None)
 
 # -----------------------
-# On ready: sync slash commands & start loops
+# On ready: sync commands & start loops
 # -----------------------
 @bot.event
 async def on_ready():
