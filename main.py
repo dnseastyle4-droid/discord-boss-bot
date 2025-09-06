@@ -56,7 +56,7 @@ except Exception:
 # Raw lists
 # -----------------------
 WORLD_BOSSES_RAW = {
-    "Venatus": 10, "Viorent": 10, "Ego": 21, "Livera": 24, "Araneo": 21,
+    "Venatus": 10, "Viorent": 10, "Ego": 21, "Livera": 24, "Araneo": 24,
     "Undomiel": 24, "Lady Dalia": 18, "General Aquileus": 29, "Amentis": 29,
     "Baron Braudmore": 32, "Supore": 62, "Asta": 62, "Secreta": 62, "Ordo": 62,
     "Gareth": 32, "Shuliar": 35, "Larba": 35, "Catena": 35, "Titore": 37,
